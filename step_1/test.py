@@ -4,9 +4,11 @@ import json
 
 from tqdm import tqdm, trange
 
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, roc_curve
 
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
 import torch
 from torch import nn
@@ -16,108 +18,91 @@ from torch.optim import AdamW
 
 from torchvision.datasets import oxford_iiit_pet
 from torchvision.models.densenet import DenseNet121_Weights, densenet121
+from torchvision.io import read_image, ImageReadMode
 
-dataset = Path("datasets") / "oxfordIII"
 
-files = dataset.glob('*.png')
+class ImageDataset(Dataset):
+    def __init__(self, images, labels, transforms=None):
+        self.images = images
+        self.labels = labels
+        self.transforms = transforms
+        
+    def __getitem__(self, index):
+        image_path = self.images[index]
+        image = read_image(image_path, mode=ImageReadMode.RGB)
+        if self.transforms is not None:
+            image = self.transforms(image)
+        label_string = self.labels[index]
+        float_label = 1. if label_string == 'cat' else 0.
+        label = torch.tensor([float_label])
+        return image, label
+    
+    def __len__(self):
+        return len(self.images)
 
-labels = []
 
-indices = np.arange(len(files))
+with open('data_split_indices.json') as fp:
+    data_splits = json.load(fp)
 
-test_split_indices, modeling_split_indices = train_test_split(indices, test_size=0.1, stratify=labels)
-modeling_labels = labels[modeling_split_indices]
-dev_indices, train_indices = train_test_split(modeling_split_indices, test_size=0.1, stratify=modeling_labels)
+test_images = [Path(s) for s in data_splits['test_images']]
+test_labels = data_splits['test_labels']
 
-test_images = [files[i] for i in test_split_indices]
-test_labels = [labels[i] for i in test_split_indices]
-dev_images = [files[i] for i in dev_indices]
-dev_labels = [labels[i] for i in dev_indices]
-train_images = [files[i] for i in train_indices]
-train_labels = [files[i] for i in train_indices]
-
-with open("data_split_indices.json", 'w') as fp:
-    data_splits = dict(test_images=test_images, test_labels=test_labels, dev_images=dev_images, dev_labels=dev_labels, train_images=train_images, train_labels=train_labels)
-    json.dump(data_splits, sort_keys=True, indent=2)
-
-num_classes = 2
 
 weights = DenseNet121_Weights.DEFAULT
 model = densenet121(weights)
-model.classifier = nn.Sequential(nn.Linear(model.classifier.output_dim, 1024), nn.ReLU(), nn.Dropout(0.5), nn.Linear(1024, 1)) # We set the dimension to 1 since we'll use a sigmoid output
+model.classifier = nn.Sequential(nn.Linear(model.classifier.in_features, 1024), nn.ReLU(), nn.Dropout(0.5), nn.Linear(1024, 1)) # We set the dimension to 1 since we'll use a sigmoid output
 
+model.load_state_dict(torch.load('models/best_model.pth', weights_only=True))
 
-training_dataset = ImageDataset(train_images, train_labels)
-dev_dataset = ImageDataset(dev_images, dev_labels)
+test_dataset = ImageDataset(test_images, test_labels, transforms=weights.transforms())
 
-
-max_epochs = 50
-
-device = torch
+device = torch.device('cuda')
 loss_fn = nn.BCEWithLogitsLoss()
-optimizer = AdamW(model.parameters(), lr=0.003, weight_decay=1e-5)
 
-training_dataloader = DataLoader(training_dataset, 
-                                 batch_size=16, 
-                                 drop_last=True, #When training it can actually be a good idea to drop the last batch. If you're using batch normalization somewhere the training can break if there's just a single example in the batch 
-                                 shuffle=True
-                                 )
+model.to(device)
 
-dev_dataloader = DataLoader(dev_dataset, 
+test_dataloader = DataLoader(test_dataset, 
                                  batch_size=16, 
                                  drop_last=False,
                                  shuffle=False
                                  )
 
-best_model = None
-best_loss = float('inf')
+with torch.no_grad():
+    model.eval()
 
-early_stoping_patience = 20
-epochs_of_no_progress = 0
-for epoch in trange(max_epochs, desc='epoch'):
-    model.train()
-    for training_batch in tqdm(training_dataloader, desc='training batch', leave=False):
-        optimizer.zero_grad()
-        x, y = training_batch
+    test_losses = 0
+    test_samples = 0
+    test_logits = []
+    test_probabilities = []
+    test_labels = []
+    
+    for test_batch in tqdm(test_dataloader, desc='test batch', leave=False):
+        x, y = test_batch
         x = x.to(device)
         y = y.to(device)
-        prediction = model(training_batch)
+        prediction = model(x)
         loss = loss_fn(prediction, y)
-        loss.backward()
-        optimizer.step()
+        probs = torch.sigmoid(prediction)
+        test_logits.append(prediction.cpu().numpy())
+        test_labels.append(y.cpu().numpy())
+        test_probabilities.append(probs.cpu().numpy())
+        # A minor detail, but since we're not dropping any batches we 
+        # can't just take the mean of all the losses over all batches. 
+        # This would slightly overweight the last batch if it's smaller than the others.
+        n_samples = len(x)
+        test_samples += n_samples
+        test_losses += loss.item()*n_samples
+    mean_test_performance = test_losses / test_samples
+    print(f'test loss: {mean_test_performance}')
     
-    model.eval()
-    with torch.no_grad():
-        dev_losses = 0
-        dev_samples = 0
-        for dev_batch in tqdm(dev_dataloader, desc='dev batch', leave=False):
-            x, y = training_batch
-            x = x.to(device)
-            y = y.to(device)
-            prediction = model(training_batch)
-            loss = loss_fn(prediction, y)
-            dev_losses += loss.item()
-            # A minor detail, but since we're not dropping any batches we 
-            # can't just take the mean of all the losses over all batches. 
-            # This would slightly overweight the last batch if it's smaller than the others.
-            dev_samples += len(x)  
-        mean_dev_performance = dev_losses / dev_samples
-        print(f'dev loss: {mean_dev_performance}')  
-        
-        if mean_dev_performance < best_loss:
-            epochs_of_no_progress = 0
-            best_loss = mean_dev_performance
-            best_model = deepcopy(model)
-            model_path = Path('models') / 'best_model.pth'
-            model_path.parent.mkdir(exist_ok=True, parents=True)
-            torch.save(model.state_dict(), model_path)
-        else:
-            epochs_of_no_progress += 1
-        
-    if epochs_of_no_progress >= early_stoping_patience:
-        print("Patience has run out, early stopping")
-        break
-        
-print("Training is done")
-
-                
+    test_logits = np.concat(test_logits).flatten()
+    test_labels = np.concat(test_labels).flatten()
+    test_probabilities = np.concat(test_probabilities).flatten()
+    
+    predictions_df = pd.DataFrame(data=dict(files=[str(p) for p in test_images],
+                                            labels=test_labels,
+                                            logits=test_logits,
+                                            p=test_probabilities))
+    
+    predictions_df.to_csv('test_prediction.csv', index=False)
+    
