@@ -1,4 +1,4 @@
-# Automate your machine learning experiments
+# Make ML more reproducible
 
 This repository contains code for the AIDA Technical Workshop on MLFlow and experiment automation.
 
