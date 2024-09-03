@@ -10,6 +10,7 @@ from sklearn.metrics import roc_auc_score, roc_curve
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import seaborn as sns
 from PIL import Image
@@ -19,7 +20,7 @@ import mlflow
 runs_search_results_df = mlflow.search_runs(filter_string='tags.warmup = "False"', )
 run_ids = runs_search_results_df['run_id']
     
-for run_id in run_ids:
+for run_id in tqdm(run_ids):
     with mlflow.start_run(run_id) as run:
         
         dev_predictions_df = mlflow.load_table('dev_predictions.json', run_ids=[run_id])
