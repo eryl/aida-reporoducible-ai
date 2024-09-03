@@ -174,7 +174,7 @@ def train_model(model, training_dataloader, dev_dataloader, optimizer, loss_fn, 
 
 def run_training(training_dataset: ImageDataset, dev_dataset: ImageDataset, test_dataset: ImageDataset, device):
     weights = DenseNet121_Weights.DEFAULT
-    model = densenet121(weights)
+    model = densenet121(weights=weights)
     model.classifier = nn.Sequential(nn.Linear(model.classifier.in_features, 1024), nn.ReLU(), nn.Dropout(0.5), nn.Linear(1024, 1)) # We set the dimension to 1 since we'll use a sigmoid output
 
     training_transforms = nn.Sequential(AutoAugment(), weights.transforms())

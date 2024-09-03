@@ -16,7 +16,8 @@ from PIL import Image
 
 import mlflow
 
-runs_search_results_df = mlflow.search_runs(filter_string='tags.warmup = "False"', )
+mlflow.set_experiment(f"step_5")
+runs_search_results_df = mlflow.search_runs(experiment_names=['step_5'], filter_string='tags.run_level = "resample"')
 run_ids = runs_search_results_df['run_id']
     
 for run_id in run_ids:

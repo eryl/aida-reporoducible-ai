@@ -153,7 +153,7 @@ def run_training(training_dataset: ImageDataset, dev_dataset: ImageDataset, test
     mlflow.log_params(params)
         
     weights = DenseNet121_Weights.DEFAULT
-    model = densenet121(weights)
+    model = densenet121(weights=weights)
     model.classifier = nn.Sequential(nn.Linear(model.classifier.in_features, config.hidden_dim), nn.ReLU(), nn.Dropout(config.dropout_rate), nn.Linear(config.hidden_dim, 1)) # We set the dimension to 1 since we'll use a sigmoid output
 
     training_transforms = nn.Sequential(AutoAugment(), weights.transforms())
@@ -277,19 +277,19 @@ def main():
             dataset_splits = json.load(fp)
         mlflow.log_artifact(split_path, 'dataset_splits.json')
         
-        n_root_splits = 1  # We can set this to limit the actual number of splits
-        n_nested_splits = 1
+        n_root_splits = 2  # We can set this to limit the actual number of splits
+        n_nested_splits = 2
         files = [Path(f) for f in dataset_splits['files']]
         
         current_root_split = 0
         for root_split_id, root_splits in dataset_splits['root_splits'].items():
-            if current_root_split >= n_root_splits:
+            if n_root_splits is not None and current_root_split >= n_root_splits:
                 break
             current_root_split += 1
             
             current_nested_split = 0
             for nested_split_id, nested_splits in root_splits['nested_splits'].items():
-                if current_nested_split >= n_nested_splits:
+                if n_nested_splits is not None and current_nested_split >= n_nested_splits:
                     break
                 current_nested_split += 1
                 
