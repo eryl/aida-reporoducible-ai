@@ -1,0 +1,19 @@
+name: reproai
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - ca-certificates
+  - openssl
+  - tqdm
+  - certifi
+  - scikit-learn
+  - matplotlib
+  - pandas
+  - seaborn
+  - mlflow
+  - optuna
