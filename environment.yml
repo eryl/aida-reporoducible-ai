@@ -1,6 +1,7 @@
 name: reproai
 channels:
   - conda-forge
+  - nvidia
 dependencies:
   - python=3.10
   - pytorch
