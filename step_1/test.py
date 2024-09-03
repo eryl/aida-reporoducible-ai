@@ -61,48 +61,4 @@ loss_fn = nn.BCEWithLogitsLoss()
 
 model.to(device)
 
-test_dataloader = DataLoader(test_dataset, 
-                                 batch_size=16, 
-                                 drop_last=False,
-                                 shuffle=False
-                                 )
 
-with torch.no_grad():
-    model.eval()
-
-    test_losses = 0
-    test_samples = 0
-    test_logits = []
-    test_probabilities = []
-    test_labels = []
-    
-    for test_batch in tqdm(test_dataloader, desc='test batch', leave=False):
-        x, y = test_batch
-        x = x.to(device)
-        y = y.to(device)
-        prediction = model(x)
-        loss = loss_fn(prediction, y)
-        probs = torch.sigmoid(prediction)
-        test_logits.append(prediction.cpu().numpy())
-        test_labels.append(y.cpu().numpy())
-        test_probabilities.append(probs.cpu().numpy())
-        # A minor detail, but since we're not dropping any batches we 
-        # can't just take the mean of all the losses over all batches. 
-        # This would slightly overweight the last batch if it's smaller than the others.
-        n_samples = len(x)
-        test_samples += n_samples
-        test_losses += loss.item()*n_samples
-    mean_test_performance = test_losses / test_samples
-    print(f'test loss: {mean_test_performance}')
-    
-    test_logits = np.concat(test_logits).flatten()
-    test_labels = np.concat(test_labels).flatten()
-    test_probabilities = np.concat(test_probabilities).flatten()
-    
-    predictions_df = pd.DataFrame(data=dict(files=[str(p) for p in test_images],
-                                            labels=test_labels,
-                                            logits=test_logits,
-                                            p=test_probabilities))
-    
-    predictions_df.to_csv('test_prediction.csv', index=False)
-    

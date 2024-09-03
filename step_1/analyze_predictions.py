@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 predictions_df = pd.read_csv('test_prediction.csv')
-labels = predictions_df['labels']  
-logits = predictions_df['logits']  
+labels = predictions_df['labels']
+logits = predictions_df['logits']
 
 roc_auc = roc_auc_score(labels, logits)
 

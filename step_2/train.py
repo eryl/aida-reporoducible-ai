@@ -21,6 +21,7 @@ from torchvision.models.densenet import DenseNet121_Weights, densenet121
 from torchvision.transforms.v2 import AutoAugment, Compose
 from torchvision.io import read_image, ImageReadMode
 
+import mlflow
 
 class ImageDataset(Dataset):
     def __init__(self, images, labels, transforms=None):
@@ -77,15 +78,18 @@ def setup_data_splits():
     train_images = [files[i] for i in train_indices]
     train_labels = [labels[i] for i in train_indices]
 
-    with open("data_split_indices.json", 'w') as fp:
-        # JSON can't serialize Path objects, let's make them strings
-        data_splits = dict(test_images=[str(p) for p in test_images], 
-                        test_labels=test_labels, 
-                        dev_images=[str(p) for p in dev_images], 
-                        dev_labels=dev_labels, 
-                        train_images=[str(p) for p in train_images], 
-                        train_labels=train_labels)
-        json.dump(data_splits, fp, sort_keys=True, indent=2)
+    # with open("data_split_indices.json", 'w') as fp:
+    #     # JSON can't serialize Path objects, let's make them strings
+    #     json.dump(data_splits, fp, sort_keys=True, indent=2)
+
+    data_splits = dict(test_images=[str(p) for p in test_images], 
+                    test_labels=test_labels, 
+                    dev_images=[str(p) for p in dev_images], 
+                    dev_labels=dev_labels, 
+                    train_images=[str(p) for p in train_images], 
+                    train_labels=train_labels)
+    
+    mlflow.log_dict(data_splits, 'datas_splits.json')
     
     training_dataset = ImageDataset(train_images, train_labels)
     dev_dataset = ImageDataset(dev_images, dev_labels)
@@ -104,6 +108,7 @@ def train_on_dataloader(model, training_dataloader, optimizer, loss_fn, device, 
         loss = loss_fn(prediction, y)
         loss.backward()
         optimizer.step()
+        mlflow.log_metric('training_loss', loss.item(), step=iteration)
         iteration += 1
     return iteration
 
@@ -154,6 +159,9 @@ def train_model(model, training_dataloader, dev_dataloader, optimizer, loss_fn, 
         iteration = train_on_dataloader(model, training_dataloader, optimizer, loss_fn, device, iteration)
         evaluation_results = evaluate_on_dataloader(model, dev_dataloader, loss_fn, device)
         dev_roc_auc = evaluation_results['roc_auc']
+        dev_loss = evaluation_results['loss']
+        mlflow.log_metrics({'dev_loss': dev_loss, 'dev_roc_auc': dev_roc_auc}, step=iteration)
+        
         if dev_roc_auc > best_roc_auc:
             epochs_of_no_progress = 0
             best_roc_auc = dev_roc_auc
@@ -173,9 +181,24 @@ def train_model(model, training_dataloader, dev_dataloader, optimizer, loss_fn, 
 
 
 def run_training(training_dataset: ImageDataset, dev_dataset: ImageDataset, test_dataset: ImageDataset, device):
+    hidden_dim = 1024
+    dropout_rate = 0.5
+    warmup_learning_rate = 0.003
+    warmup_weight_decay = 1e-5
+    learning_rate = 1e-6
+    weight_decay = 1e-5
+    
+    mlflow.log_params({'hidden_dim': hidden_dim,
+                       'dropout_rate': dropout_rate,
+                       'warmup_learning_rate': warmup_learning_rate,
+                       'warmup_weight_decay': warmup_weight_decay,
+                       'learning_rate': learning_rate,
+                       'weight_decay': weight_decay
+                       })
+        
     weights = DenseNet121_Weights.DEFAULT
     model = densenet121(weights)
-    model.classifier = nn.Sequential(nn.Linear(model.classifier.in_features, 1024), nn.ReLU(), nn.Dropout(0.5), nn.Linear(1024, 1)) # We set the dimension to 1 since we'll use a sigmoid output
+    model.classifier = nn.Sequential(nn.Linear(model.classifier.in_features, hidden_dim), nn.ReLU(), nn.Dropout(dropout_rate), nn.Linear(hidden_dim, 1)) # We set the dimension to 1 since we'll use a sigmoid output
 
     training_transforms = nn.Sequential(AutoAugment(), weights.transforms())
     dev_transforms = weights.transforms()
@@ -202,31 +225,32 @@ def run_training(training_dataset: ImageDataset, dev_dataset: ImageDataset, test
     loss_fn = nn.BCEWithLogitsLoss()
 
     ### Start by only adjusting the newly added layers, keeping the rest frozen
+    with mlflow.start_run(nested=True, tags={'warmup': True}):
+        max_warmup_epochs = 1
+        # Set requires_grad to False everywhere first
+        for param in model.parameters():
+            param.requires_grad = False
+        # Now just unfreeze the parameters of the classifier head    
+        parameters_to_train = list(model.classifier.parameters())
+        for param in parameters_to_train:
+            param.requires_grad = True
+        # Only optimize the classification head
+        optimizer = AdamW(parameters_to_train, lr=warmup_learning_rate, weight_decay=warmup_weight_decay)
+        model = train_model(model=model, training_dataloader=training_dataloader, 
+                    dev_dataloader=dev_dataloader, optimizer=optimizer, loss_fn=loss_fn, device=device,
+                    max_epochs=max_warmup_epochs)
     
-    max_warmup_epochs = 1
-    # Set requires_grad to False everywhere first
-    for param in model.parameters():
-        param.requires_grad = False
-    # Now just unfreeze the parameters of the classifier head    
-    parameters_to_train = list(model.classifier.parameters())
-    for param in parameters_to_train:
-        param.requires_grad = True
-    # Only optimize the classification head
-    optimizer = AdamW(parameters_to_train, lr=0.003, weight_decay=1e-5)
-    model = train_model(model=model, training_dataloader=training_dataloader, 
-                  dev_dataloader=dev_dataloader, optimizer=optimizer, loss_fn=loss_fn, device=device,
-                  max_epochs=max_warmup_epochs)
-    
-    ## Now we unfreeze the model and train all parameters
-    max_epochs = 1
-    for param in model.parameters():
-        param.requires_grad = True
-    optimizer = AdamW(model.parameters(), lr=0.000001, weight_decay=1e-5)
-    model = train_model(model, training_dataloader=training_dataloader, 
-                          dev_dataloader=dev_dataloader, optimizer=optimizer, 
-                          loss_fn=loss_fn, device=device, max_epochs=max_epochs)
-    print("Training is done")
-    
+    with mlflow.start_run(nested=True, tags={'warmup': False}):
+        ## Now we unfreeze the model and train all parameters
+        max_epochs = 1
+        for param in model.parameters():
+            param.requires_grad = True
+        optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        model = train_model(model, training_dataloader=training_dataloader, 
+                            dev_dataloader=dev_dataloader, optimizer=optimizer, 
+                            loss_fn=loss_fn, device=device, max_epochs=max_epochs)
+        print("Training is done")
+        
     return model
 
 
@@ -244,39 +268,38 @@ def fit_threshold(targets, predictions):
 
 def evaluate_model(model, dataset, tag, device, threshold=None):
     test_dataloader = DataLoader(dataset, 
-                                    batch_size=16, 
-                                    drop_last=False,
-                                    shuffle=False
-                                    )
+                                 batch_size=16, 
+                                 drop_last=False,
+                                 shuffle=False
+                                 )
 
     loss_fn = nn.BCEWithLogitsLoss()
     results = evaluate_on_dataloader(model, test_dataloader, loss_fn, device)
     labels = results['labels']
     logits = results['logits']
-    
     if threshold is None:
         threshold = fit_threshold(labels, logits)
-        with open(f'{tag}_threshold.txt', 'w') as fp:
-            fp.write(f'{threshold}')
-    
+        mlflow.log_param(f'{tag}_threshold', threshold)
+        
     class_predictions = results['logits'] >= threshold
     predictions_df = pd.DataFrame(data=dict(files=[str(p) for p in dataset.images],
                                             labels=results['labels'],
                                             logits=results['logits'],
                                             p=results['probabilities'],
                                             class_predictions=class_predictions))
-    
-    predictions_df.to_csv(f'{tag}_predictions.csv', index=False)
+    mlflow.log_table(predictions_df, f'{tag}_predictions.json')
     return threshold
     
         
 def main():
     device = torch.device('cuda')
-    training_dataset, dev_dataset, test_dataset = setup_data_splits()
-    model = run_training(training_dataset, dev_dataset, test_dataset, device=device)
-    dev_threshold = evaluate_model(model, dev_dataset, 'dev', device=device)
-    evaluate_model(model, test_dataset, 'test', device=device, threshold=dev_threshold)
+    with mlflow.start_run(tags={'run_level': 'root'}):
+        training_dataset, dev_dataset, test_dataset = setup_data_splits()
+        model = run_training(training_dataset, dev_dataset, test_dataset, device=device)
+        dev_threshold = evaluate_model(model, dev_dataset, 'dev', device=device)
+        evaluate_model(model, test_dataset, 'test', device=device, threshold=dev_threshold)
 
 
 if __name__ == '__main__':
+    mlflow.set_experiment(f"step_2")
     main()
